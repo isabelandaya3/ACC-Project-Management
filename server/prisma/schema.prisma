@@ -1,0 +1,124 @@
+// Prisma Schema for ACC Integration MVP
+// Supports SQLite for local dev, Postgres for production
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Stores OAuth tokens for authenticated users
+model AuthToken {
+  id                String    @id @default(uuid())
+  userId            String    @unique // Autodesk user ID
+  email             String?
+  firstName         String?
+  lastName          String?
+  accessToken       String    // Encrypted
+  refreshToken      String    // Encrypted
+  expiresAt         DateTime
+  scopes            String    // Comma-separated scopes
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// Tracks OAuth state for CSRF protection
+model OAuthState {
+  id        String   @id @default(uuid())
+  state     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([state])
+  @@index([expiresAt])
+}
+
+// Tracks sync progress per project/module
+model SyncCursor {
+  id          String   @id @default(uuid())
+  projectId   String
+  module      String   // 'rfi' | 'submittal'
+  lastSeenAt  DateTime
+  lastSeenId  String?  // Last processed item ID
+  cursorToken String?  // API pagination cursor if supported
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([projectId, module])
+  @@index([projectId])
+  @@index([module])
+}
+
+// Tracks ingested items for idempotency
+model IngestedItem {
+  id          String   @id @default(uuid())
+  externalId  String   // External ID from ACC
+  module      String   // 'rfi' | 'submittal'
+  projectId   String
+  payloadHash String   // Hash of item payload for change detection
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([externalId, module, projectId])
+  @@index([projectId])
+  @@index([module])
+  @@index([firstSeenAt])
+}
+
+// Audit log for sync operations
+model SyncLog {
+  id             String   @id @default(uuid())
+  projectId      String
+  module         String
+  status         String   // 'started' | 'completed' | 'failed'
+  itemsProcessed Int      @default(0)
+  newItems       Int      @default(0)
+  errors         String?  // JSON array of error messages
+  duration       Int?     // Duration in milliseconds
+  triggeredBy    String   // 'cron' | 'manual' | 'webhook'
+  startedAt      DateTime @default(now())
+  completedAt    DateTime?
+
+  @@index([projectId])
+  @@index([module])
+  @@index([startedAt])
+  @@index([status])
+}
+
+// Projects enabled for sync
+model EnabledProject {
+  id          String   @id @default(uuid())
+  projectId   String   @unique
+  hubId       String
+  name        String
+  syncRfis    Boolean  @default(true)
+  syncSubs    Boolean  @default(true)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isActive])
+}
+
+// Downloaded attachments metadata
+model DownloadedAttachment {
+  id           String   @id @default(uuid())
+  externalId   String   // External attachment ID
+  module       String
+  projectId    String
+  fileName     String
+  mimeType     String?
+  size         Int?
+  localPath    String   // Path in ./storage
+  downloadedAt DateTime @default(now())
+
+  @@unique([externalId, module, projectId])
+  @@index([projectId])
+}

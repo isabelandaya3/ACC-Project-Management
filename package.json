@@ -1,0 +1,20 @@
+{
+  "name": "acc-integration-mvp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Autodesk Construction Cloud Integration MVP",
+  "scripts": {
+    "install:all": "npm install && cd shared && npm install && npm run build && cd ../server && npm install && cd ../web && npm install",
+    "build:all": "cd shared && npm run build && cd ../server && npm run build && cd ../web && npm run build",
+    "dev:server": "cd server && npm run dev",
+    "dev:web": "cd web && npm run dev"
+  },
+  "keywords": [
+    "autodesk",
+    "acc",
+    "aps",
+    "construction-cloud"
+  ],
+  "author": "",
+  "license": "MIT"
+}
