@@ -108,7 +108,8 @@ router.get('/callback', async (req: Request, res: Response) => {
     // Redirect to frontend
     res.redirect(`${config.webOrigin}/auth/success`);
   } catch (error) {
-    logger.error({ requestId: req.requestId, error }, 'OAuth callback failed');
+    logger.error({ requestId: req.requestId, error: error instanceof Error ? { message: error.message, stack: error.stack, ...error } : error }, 'OAuth callback failed'); console.error('Full callback error:', JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
+    require('fs').appendFileSync('callback-error.log', new Date().toISOString() + ' - ' + JSON.stringify(error, Object.getOwnPropertyNames(error), 2) + '\n\n');
     res.redirect(`${config.webOrigin}/auth/error?error=callback_failed`);
   }
 });
@@ -122,7 +123,7 @@ router.get('/logout', async (req: Request, res: Response) => {
   
   if (userId) {
     // Optionally delete tokens from database
-    // await prisma.authToken.delete({ where: { userId } });
+    // await prisma.accOAuthToken.delete({ where: { userId } });
     
     logger.info({ requestId: req.requestId, userId }, 'User logged out');
   }
@@ -150,7 +151,7 @@ router.get('/status', async (req: Request, res: Response) => {
     });
   }
   
-  const authToken = await prisma.authToken.findUnique({
+  const authToken = await prisma.accOAuthToken.findUnique({
     where: { userId },
     select: {
       email: true,
@@ -184,3 +185,5 @@ router.get('/status', async (req: Request, res: Response) => {
 });
 
 export default router;
+
+

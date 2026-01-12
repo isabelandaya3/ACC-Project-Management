@@ -119,7 +119,7 @@ export async function storeTokens(
 ): Promise<void> {
   const expiresAt = new Date(Date.now() + tokens.expires_in * 1000);
   
-  await prisma.authToken.upsert({
+  await prisma.accOAuthToken.upsert({
     where: { userId },
     create: {
       userId,
@@ -149,7 +149,7 @@ export async function storeTokens(
  * Gets a valid access token for a user, refreshing if necessary
  */
 export async function getValidAccessToken(userId: string): Promise<string | null> {
-  const authToken = await prisma.authToken.findUnique({
+  const authToken = await prisma.accOAuthToken.findUnique({
     where: { userId },
   });
   
@@ -184,7 +184,7 @@ export async function getValidAccessToken(userId: string): Promise<string | null
     log.error({ userId, error }, 'Failed to refresh token');
     
     // Delete invalid token
-    await prisma.authToken.delete({ where: { userId } });
+    await prisma.accOAuthToken.delete({ where: { userId } });
     
     return null;
   }
@@ -745,3 +745,5 @@ export async function downloadAttachment(
   
   return null;
 }
+
+
