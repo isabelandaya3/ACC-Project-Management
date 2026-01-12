@@ -1,19 +1,53 @@
-// Prisma Schema for ACC Integration MVP
-// Supports SQLite for local dev, Postgres for production
+// Prisma Schema for ACC Project Management System
+// Production: PostgreSQL, Development: SQLite
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
-// Stores OAuth tokens for authenticated users
-model AuthToken {
+// ============================================================================
+// AUTHENTICATION & USER MANAGEMENT
+// ============================================================================
+
+// Internal application users (email + password, later SSO)
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  passwordHash  String?  // Nullable for SSO users
+  firstName     String
+  lastName      String
+  isActive      Boolean  @default(true)
+  lastLoginAt   DateTime?
+  
+  // SSO integration fields (for future Azure AD / Entra)
+  externalId    String?  @unique // Azure AD object ID
+  ssoProvider   String?  // 'azure_ad' | 'google' | etc
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  // Relations
+  projectMemberships  ProjectMembership[]
+  assignedRfis        RfiAssignment[]
+  assignedSubmittals  SubmittalAssignment[]
+  comments            Comment[]
+  notifications       Notification[]
+  auditLogs           AuditLog[]
+  
+  @@index([email])
+  @@index([isActive])
+  @@index([externalId])
+}
+
+// Stores OAuth tokens for ACC API access (per project admin)
+model AccOAuthToken {
   id                String    @id @default(uuid())
-  userId            String    @unique // Autodesk user ID
+  userId            String    // Autodesk user ID (not our User.id)
   email             String?
   firstName         String?
   lastName          String?
@@ -23,6 +57,9 @@ model AuthToken {
   scopes            String    // Comma-separated scopes
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
+  
+  // Relations
+  projectLinks      AccProjectLink[]
 
   @@index([userId])
   @@index([expiresAt])
@@ -39,86 +76,544 @@ model OAuthState {
   @@index([expiresAt])
 }
 
+// ============================================================================
+// PROJECT MANAGEMENT
+// ============================================================================
+
+// Internal project representation
+model Project {
+  id                  String   @id @default(uuid())
+  name                String
+  description         String?
+  
+  // Network folder configuration
+  networkBasePath     String?  // e.g., \\server\share\Project123\ACC_Backup
+  isNetworkPathValid  Boolean  @default(false)
+  lastPathCheckAt     DateTime?
+  
+  // Sync settings
+  syncEnabled         Boolean  @default(true)
+  syncIntervalMinutes Int      @default(15)
+  lastSyncAt          DateTime?
+  
+  // Auto-assignment rules (JSON)
+  assignmentRules     String?  // JSON: {discipline: userId mappings}
+  
+  // Internal deadline rules (JSON)
+  deadlineRules       String?  // JSON: {priority: {review: %, qc: %}}
+  
+  // Notification settings (JSON)
+  notificationRules   String?  // JSON: {daysBeforeDue: [3, 1], enabled: true}
+  
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  
+  // Relations
+  accProjectLinks     AccProjectLink[]
+  memberships         ProjectMembership[]
+  rfis                Rfi[]
+  submittals          Submittal[]
+  syncCursors         SyncCursor[]
+  syncLogs            SyncLog[]
+  
+  @@index([isActive])
+  @@index([lastSyncAt])
+}
+
+// Links an internal project to ACC projects via OAuth (supports multiple ACC projects)
+model AccProjectLink {
+  id              String   @id @default(uuid())
+  projectId       String
+  accProjectId    String   // ACC project ID (urn)
+  accHubId        String   // ACC hub/account ID
+  accProjectName  String
+  
+  // Folder name for this ACC project in network structure
+  folderName      String   // e.g., "ProjectA" or "Building_East"
+  
+  // Reference to the admin's OAuth token
+  oauthTokenId    String
+  
+  // Module sync toggles
+  syncRfis        Boolean  @default(true)
+  syncSubmittals  Boolean  @default(true)
+  
+  linkedAt        DateTime @default(now())
+  lastSyncStatus  String?  // 'success' | 'failed' | 'in_progress'
+  lastSyncError   String?
+  
+  // Relations
+  project         Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  oauthToken      AccOAuthToken   @relation(fields: [oauthTokenId], references: [id])
+  rfis            Rfi[]
+  submittals      Submittal[]
+  
+  @@unique([projectId, accProjectId])
+  @@index([projectId])
+  @@index([accProjectId])
+  @@index([oauthTokenId])
+}
+
+// User membership in projects with roles
+model ProjectMembership {
+  id          String   @id @default(uuid())
+  projectId   String
+  userId      String
+  role        String   // 'PROJECT_ADMIN' | 'REVIEWER' | 'QC_REVIEWER' | 'VIEWER'
+  
+  // Permissions (for fine-grained control)
+  canAssign   Boolean  @default(false)
+  canSendToAcc Boolean @default(false)
+  canEditSettings Boolean @default(false)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([projectId, userId])
+  @@index([userId])
+  @@index([role])
+}
+
+// ============================================================================
+// RFI MANAGEMENT
+// ============================================================================
+
+model Rfi {
+  id                  String   @id @default(uuid())
+  projectId           String
+  accProjectLinkId    String   // Which ACC project this RFI belongs to
+  
+  // ACC source data
+  accRfiId            String   // External RFI ID from ACC
+  accNumber           String   // RFI number (e.g., "RFI-0123")
+  title               String
+  discipline          String?
+  accStatus           String   // ACC's official status
+  priority            String?  // 'low' | 'normal' | 'high' | 'urgent'
+  
+  // ACC metadata
+  accCreatedBy        String?
+  accAssignedTo       String?  // JSON array of ACC users
+  accDueDate          DateTime?
+  accDescription      String?
+  accContractorComments String?
+  
+  // Timestamps from ACC
+  accCreatedAt        DateTime
+  accUpdatedAt        DateTime
+  
+  // Internal workflow
+  internalStatus      String   @default("UNASSIGNED") 
+  // UNASSIGNED | ASSIGNED_FOR_REVIEW | UNDER_REVIEW | UNDER_QC | READY_FOR_RESPONSE | SENT_TO_ACC | CLOSED
+  
+  // Internal deadlines
+  reviewDeadline      DateTime?
+  qcDeadline          DateTime?
+  
+  // Change detection & flags
+  accDataHash         String   // Hash of ACC data for change detection
+  hasUnacknowledgedChange Boolean @default(false)
+  lastAccChangeAt     DateTime?
+  changesSummary      String?  // JSON summary of what changed
+  
+  // Official response (to be sent to ACC)
+  responseStatus      String?  // 'approved' | 'approved_as_noted' | 'for_record_only' | 'rejected' | 'revise_and_resubmit'
+  responseText        String?
+  responseSentAt      DateTime?
+  responseSentBy      String?  // User ID
+  
+  // Manual response detection (response added directly in ACC)
+  hasManualResponse   Boolean  @default(false)
+  manualResponseDetectedAt DateTime?
+  manualResponseData  String?  // JSON: ACC response details
+  manualResponseConfirmedBy String? // Admin who confirmed
+  manualResponseConfirmedAt DateTime?
+  
+  // Metadata
+  isDeleted           Boolean  @default(false)
+  firstSeenAt         DateTime @default(now())
+  lastSeenAt          DateTime @default(now())
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  
+  // Relations
+  project             Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  accProjectLink      AccProjectLink       @relation(fields: [accProjectLinkId], references: [id], onDelete: Cascade)
+  assignments         RfiAssignment[]
+  attachments         Attachment[]
+  comments            Comment[]
+  statusHistory       StatusHistory[]
+  notifications       Notification[]
+  auditLogs           AuditLog[]
+  
+  @@unique([accProjectLinkId, accRfiId])
+  @@index([projectId, internalStatus])
+  @@index([accProjectLinkId])
+  @@index([accNumber])
+  @@index([accDueDate])
+  @@index([reviewDeadline])
+  @@index([internalStatus])
+  @@index([priority])
+  @@index([hasUnacknowledgedChange])
+}
+
+// Assignments for RFI (primary reviewer, QC reviewer)
+model RfiAssignment {
+  id            String   @id @default(uuid())
+  rfiId         String
+  userId        String
+  role          String   // 'REVIEWER' | 'QC_REVIEWER'
+  assignedAt    DateTime @default(now())
+  assignedBy    String?  // User ID of assigner
+  completedAt   DateTime?
+  isUnread      Boolean  @default(true) // For "new assignment" notifications
+  
+  // Relations
+  rfi           Rfi      @relation(fields: [rfiId], references: [id], onDelete: Cascade)
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([rfiId, userId, role])
+  @@index([userId, isUnread])
+  @@index([assignedAt])
+}
+
+// ============================================================================
+// SUBMITTAL MANAGEMENT
+// ============================================================================
+
+model Submittal {
+  id                  String   @id @default(uuid())
+  projectId           String
+  accProjectLinkId    String   // Which ACC project this Submittal belongs to
+  
+  // ACC source data
+  accSubmittalId      String   // External submittal ID from ACC
+  accNumber           String   // Submittal number (e.g., "SUB-0045")
+  title               String
+  specSection         String?
+  packageNumber       String?
+  accStatus           String   // ACC's official status
+  priority            String?  // 'low' | 'normal' | 'high' | 'urgent'
+  
+  // ACC metadata
+  accCreatedBy        String?
+  accAssignedTo       String?  // JSON array of ACC users
+  accDueDate          DateTime?
+  accDescription      String?
+  accContractorComments String?
+  
+  // Timestamps from ACC
+  accCreatedAt        DateTime
+  accUpdatedAt        DateTime
+  
+  // Internal workflow
+  internalStatus      String   @default("UNASSIGNED")
+  
+  // Internal deadlines
+  reviewDeadline      DateTime?
+  qcDeadline          DateTime?
+  
+  // Change detection & flags
+  accDataHash         String
+  hasUnacknowledgedChange Boolean @default(false)
+  lastAccChangeAt     DateTime?
+  changesSummary      String?
+  
+  // Official response
+  responseStatus      String?
+  responseText        String?
+  responseSentAt      DateTime?
+  responseSentBy      String?
+  
+  // Manual response detection (response added directly in ACC)
+  hasManualResponse   Boolean  @default(false)
+  manualResponseDetectedAt DateTime?
+  manualResponseData  String?  // JSON: ACC response details
+  manualResponseConfirmedBy String? // Admin who confirmed
+  manualResponseConfirmedAt DateTime?
+  
+  // Metadata
+  isDeleted           Boolean  @default(false)
+  firstSeenAt         DateTime @default(now())
+  lastSeenAt          DateTime @default(now())
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  
+  // Relations
+  project             Project                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  accProjectLink      AccProjectLink           @relation(fields: [accProjectLinkId], references: [id], onDelete: Cascade)
+  assignments         SubmittalAssignment[]
+  attachments         Attachment[]
+  comments            Comment[]
+  statusHistory       StatusHistory[]
+  notifications       Notification[]
+  auditLogs           AuditLog[]
+  
+  @@unique([accProjectLinkId, accSubmittalId])
+  @@index([projectId, internalStatus])
+  @@index([accProjectLinkId])
+  @@index([accNumber])
+  @@index([accDueDate])
+  @@index([reviewDeadline])
+  @@index([internalStatus])
+  @@index([priority])
+  @@index([hasUnacknowledgedChange])
+}
+
+// Assignments for Submittal
+model SubmittalAssignment {
+  id            String     @id @default(uuid())
+  submittalId   String
+  userId        String
+  role          String     // 'REVIEWER' | 'QC_REVIEWER'
+  assignedAt    DateTime   @default(now())
+  assignedBy    String?
+  completedAt   DateTime?
+  isUnread      Boolean    @default(true)
+  
+  // Relations
+  submittal     Submittal  @relation(fields: [submittalId], references: [id], onDelete: Cascade)
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([submittalId, userId, role])
+  @@index([userId, isUnread])
+  @@index([assignedAt])
+}
+
+// ============================================================================
+// ATTACHMENTS & FILE MANAGEMENT
+// ============================================================================
+
+model Attachment {
+  id                String   @id @default(uuid())
+  
+  // Parent item (polymorphic: RFI or Submittal)
+  rfiId             String?
+  submittalId       String?
+  
+  // File metadata
+  fileName          String
+  fileSize          Int?
+  mimeType          String?
+  
+  // Source type
+  source            String   // 'ACC_EXPORT' | 'ACC_ORIGINAL' | 'RESPONSE_ATTACHMENT'
+  
+  // ACC reference (if from ACC)
+  accAttachmentId   String?
+  accVersionUrn     String?
+  
+  // Network filesystem path
+  filesystemPath    String?  // e.g., \\server\share\...\RFIs\RFI-0123\file.pdf
+  
+  // Metadata
+  uploadedAt        DateTime @default(now())
+  uploadedBy        String?  // User ID
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  // Relations
+  rfi               Rfi?      @relation(fields: [rfiId], references: [id], onDelete: Cascade)
+  submittal         Submittal? @relation(fields: [submittalId], references: [id], onDelete: Cascade)
+  
+  @@index([rfiId])
+  @@index([submittalId])
+  @@index([source])
+  @@index([accAttachmentId])
+}
+
+// ============================================================================
+// COMMENTS & COLLABORATION
+// ============================================================================
+
+model Comment {
+  id            String    @id @default(uuid())
+  
+  // Parent item (polymorphic)
+  rfiId         String?
+  submittalId   String?
+  
+  // Content
+  text          String
+  authorId      String
+  
+  // Threading
+  parentId      String?   // For nested replies
+  
+  // Mentions (JSON array of user IDs)
+  mentions      String?   // JSON: ["userId1", "userId2"]
+  
+  // Metadata
+  isEdited      Boolean   @default(false)
+  editedAt      DateTime?
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  // Relations
+  rfi           Rfi?      @relation(fields: [rfiId], references: [id], onDelete: Cascade)
+  submittal     Submittal? @relation(fields: [submittalId], references: [id], onDelete: Cascade)
+  author        User      @relation(fields: [authorId], references: [id])
+  parent        Comment?  @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies       Comment[] @relation("CommentReplies")
+  
+  @@index([rfiId, createdAt])
+  @@index([submittalId, createdAt])
+  @@index([authorId])
+  @@index([parentId])
+}
+
+// ============================================================================
+// NOTIFICATIONS
+// ============================================================================
+
+model Notification {
+  id            String    @id @default(uuid())
+  userId        String
+  
+  // Notification type
+  type          String    // 'ASSIGNMENT' | 'DEADLINE_WARNING' | 'ACC_CHANGE' | 'MENTION' | 'STATUS_CHANGE'
+  
+  // Content
+  title         String
+  message       String
+  
+  // Link to related item
+  rfiId         String?
+  submittalId   String?
+  
+  // Metadata (JSON for additional context)
+  metadata      String?
+  
+  // State
+  isRead        Boolean   @default(false)
+  readAt        DateTime?
+  
+  createdAt     DateTime  @default(now())
+  
+  // Relations
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rfi           Rfi?      @relation(fields: [rfiId], references: [id], onDelete: Cascade)
+  submittal     Submittal? @relation(fields: [submittalId], references: [id], onDelete: Cascade)
+  
+  @@index([userId, isRead, createdAt])
+  @@index([type])
+}
+
+// ============================================================================
+// HISTORY & AUDIT
+// ============================================================================
+
+// Tracks status changes and key events for RFIs/Submittals
+model StatusHistory {
+  id            String    @id @default(uuid())
+  
+  // Parent item
+  rfiId         String?
+  submittalId   String?
+  
+  // Change details
+  fieldName     String    // 'internalStatus' | 'accStatus' | 'assignment' | 'deadline' | 'response'
+  oldValue      String?
+  newValue      String?
+  changedBy     String?   // User ID
+  changeReason  String?   // Optional context
+  
+  createdAt     DateTime  @default(now())
+  
+  // Relations
+  rfi           Rfi?      @relation(fields: [rfiId], references: [id], onDelete: Cascade)
+  submittal     Submittal? @relation(fields: [submittalId], references: [id], onDelete: Cascade)
+  
+  @@index([rfiId, createdAt])
+  @@index([submittalId, createdAt])
+  @@index([fieldName])
+}
+
+// Comprehensive audit log for all significant actions
+model AuditLog {
+  id            String    @id @default(uuid())
+  
+  // Actor
+  userId        String?
+  userEmail     String?
+  
+  // Action
+  action        String    // 'CREATE' | 'UPDATE' | 'DELETE' | 'SEND_TO_ACC' | 'ASSIGN' | etc.
+  entityType    String    // 'RFI' | 'SUBMITTAL' | 'PROJECT' | 'USER' | etc.
+  entityId      String?
+  
+  // Related items
+  rfiId         String?
+  submittalId   String?
+  
+  // Details (JSON)
+  details       String?   // JSON with before/after values, additional context
+  
+  // Request context
+  ipAddress     String?
+  userAgent     String?
+  
+  createdAt     DateTime  @default(now())
+  
+  // Relations
+  user          User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  rfi           Rfi?      @relation(fields: [rfiId], references: [id], onDelete: Cascade)
+  submittal     Submittal? @relation(fields: [submittalId], references: [id], onDelete: Cascade)
+  
+  @@index([userId, createdAt])
+  @@index([entityType, entityId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// SYNC & BACKGROUND JOBS
+// ============================================================================
+
 // Tracks sync progress per project/module
 model SyncCursor {
   id          String   @id @default(uuid())
   projectId   String
-  module      String   // 'rfi' | 'submittal'
+  module      String   // 'RFI' | 'SUBMITTAL'
   lastSeenAt  DateTime
   lastSeenId  String?  // Last processed item ID
   cursorToken String?  // API pagination cursor if supported
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
-
+  
+  // Relations
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  
   @@unique([projectId, module])
   @@index([projectId])
   @@index([module])
 }
 
-// Tracks ingested items for idempotency
-model IngestedItem {
-  id          String   @id @default(uuid())
-  externalId  String   // External ID from ACC
-  module      String   // 'rfi' | 'submittal'
-  projectId   String
-  payloadHash String   // Hash of item payload for change detection
-  firstSeenAt DateTime @default(now())
-  lastSeenAt  DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  @@unique([externalId, module, projectId])
-  @@index([projectId])
-  @@index([module])
-  @@index([firstSeenAt])
-}
-
 // Audit log for sync operations
 model SyncLog {
-  id             String   @id @default(uuid())
+  id             String    @id @default(uuid())
   projectId      String
-  module         String
-  status         String   // 'started' | 'completed' | 'failed'
-  itemsProcessed Int      @default(0)
-  newItems       Int      @default(0)
-  errors         String?  // JSON array of error messages
-  duration       Int?     // Duration in milliseconds
-  triggeredBy    String   // 'cron' | 'manual' | 'webhook'
-  startedAt      DateTime @default(now())
+  module         String    // 'RFI' | 'SUBMITTAL'
+  status         String    // 'STARTED' | 'COMPLETED' | 'FAILED'
+  itemsProcessed Int       @default(0)
+  newItems       Int       @default(0)
+  updatedItems   Int       @default(0)
+  errors         String?   // JSON array of error messages
+  duration       Int?      // Duration in milliseconds
+  triggeredBy    String    // 'CRON' | 'MANUAL' | 'PROJECT_OPEN'
+  startedAt      DateTime  @default(now())
   completedAt    DateTime?
-
-  @@index([projectId])
-  @@index([module])
-  @@index([startedAt])
+  
+  // Relations
+  project        Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  
+  @@index([projectId, module, startedAt])
   @@index([status])
-}
-
-// Projects enabled for sync
-model EnabledProject {
-  id          String   @id @default(uuid())
-  projectId   String   @unique
-  hubId       String
-  name        String
-  syncRfis    Boolean  @default(true)
-  syncSubs    Boolean  @default(true)
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  @@index([isActive])
-}
-
-// Downloaded attachments metadata
-model DownloadedAttachment {
-  id           String   @id @default(uuid())
-  externalId   String   // External attachment ID
-  module       String
-  projectId    String
-  fileName     String
-  mimeType     String?
-  size         Int?
-  localPath    String   // Path in ./storage
-  downloadedAt DateTime @default(now())
-
-  @@unique([externalId, module, projectId])
-  @@index([projectId])
 }
